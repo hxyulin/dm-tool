@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "name": "Damiao 8-motor",
+  "description": "Default profile for 8 Damiao motors (CAN IDs 0x301-0x308)",
+  "controlLimits": {
+    "min": -16384,
+    "max": 16384
+  },
+  "fields": [
+    {
+      "id": "ecd",
+      "label": "Encoder",
+      "offset": 0,
+      "bits": { "start": 0, "length": 16 },
+      "endianness": "big",
+      "signed": false,
+      "scale": 1.0,
+      "displayLimits": { "min": 0, "max": 65535 },
+      "unit": "counts"
+    },
+    {
+      "id": "speed",
+      "label": "Speed",
+      "offset": 2,
+      "bits": { "start": 0, "length": 16 },
+      "endianness": "big",
+      "signed": true,
+      "scale": 1.0,
+      "displayLimits": { "min": -10000, "max": 10000 },
+      "unit": "rpm"
+    },
+    {
+      "id": "current",
+      "label": "Current",
+      "offset": 4,
+      "bits": { "start": 0, "length": 16 },
+      "endianness": "big",
+      "signed": true,
+      "scale": 1.0,
+      "displayLimits": { "min": -20000, "max": 20000 },
+      "unit": "mA"
+    },
+    {
+      "id": "rotor_temp",
+      "label": "Rotor Temp",
+      "offset": 6,
+      "bits": { "start": 0, "length": 8 },
+      "endianness": "big",
+      "signed": false,
+      "scale": 1.0,
+      "displayLimits": { "min": 0, "max": 150 },
+      "unit": "C"
+    },
+    {
+      "id": "pcb_temp",
+      "label": "PCB Temp",
+      "offset": 7,
+      "bits": { "start": 0, "length": 8 },
+      "endianness": "big",
+      "signed": false,
+      "scale": 1.0,
+      "displayLimits": { "min": 0, "max": 150 },
+      "unit": "C"
+    }
+  ],
+  "motors": [
+    { "label": "Motor 1", "canId": "0x301" },
+    { "label": "Motor 2", "canId": "0x302" },
+    { "label": "Motor 3", "canId": "0x303" },
+    { "label": "Motor 4", "canId": "0x304" },
+    { "label": "Motor 5", "canId": "0x305" },
+    { "label": "Motor 6", "canId": "0x306" },
+    { "label": "Motor 7", "canId": "0x307" },
+    { "label": "Motor 8", "canId": "0x308" }
+  ],
+  "commandGroups": [
+    {
+      "label": "Motors 1-4",
+      "canId": "0x3FE",
+      "motorIndices": [0, 1, 2, 3],
+      "commandEndianness": "big"
+    },
+    {
+      "label": "Motors 5-8",
+      "canId": "0x4FE",
+      "motorIndices": [4, 5, 6, 7],
+      "commandEndianness": "big"
+    }
+  ]
+}

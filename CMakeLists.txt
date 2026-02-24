@@ -8,7 +8,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Charts)
 
 add_executable(dm_gui
     app/src/main.cpp
@@ -16,13 +16,23 @@ add_executable(dm_gui
     app/src/dm_device_wrapper.h
     app/src/main_window.cpp
     app/src/main_window.h
+    app/src/motor_profile.cpp
+    app/src/motor_profile.h
+    app/src/motor_profile_loader.cpp
+    app/src/motor_profile_loader.h
+    app/src/bit_extractor.cpp
+    app/src/bit_extractor.h
+    app/src/telemetry_data_store.cpp
+    app/src/telemetry_data_store.h
+    app/src/telemetry_dashboard.cpp
+    app/src/telemetry_dashboard.h
 )
 
 target_include_directories(dm_gui PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk/include
 )
 
-target_link_libraries(dm_gui PRIVATE Qt6::Widgets)
+target_link_libraries(dm_gui PRIVATE Qt6::Widgets Qt6::Charts)
 
 if(WIN32)
     if(MSVC)

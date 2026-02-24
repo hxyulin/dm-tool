@@ -1,4 +1,5 @@
 #include "dm_device_wrapper.h"
+#include "bit_extractor.h"
 
 #include <QMetaObject>
 #include <QMutexLocker>
@@ -10,6 +11,11 @@ DmDeviceWrapper::DmDeviceWrapper(QObject* parent)
     : QObject(parent)
 {
     s_instance = this;
+    // Load default profile
+    QVector<MotorProfile> profiles = defaultMotorProfiles();
+    if (!profiles.isEmpty()) {
+        m_activeProfile = profiles.first();
+    }
 }
 
 DmDeviceWrapper::~DmDeviceWrapper()
@@ -18,6 +24,12 @@ DmDeviceWrapper::~DmDeviceWrapper()
     if (s_instance == this) {
         s_instance = nullptr;
     }
+}
+
+void DmDeviceWrapper::setActiveProfile(const MotorProfile& profile)
+{
+    QMutexLocker locker(&m_mutex);
+    m_activeProfile = profile;
 }
 
 void DmDeviceWrapper::setDeviceType(device_def_t type)
@@ -115,13 +127,15 @@ bool DmDeviceWrapper::isOpen() const
     return m_open;
 }
 
-int16_t DmDeviceWrapper::clampValue(int value)
+int16_t DmDeviceWrapper::clampValue(int value) const
 {
-    if (value > 16384) {
-        return 16384;
+    int32_t min = m_activeProfile.controlLimits.min;
+    int32_t max = m_activeProfile.controlLimits.max;
+    if (value > max) {
+        return static_cast<int16_t>(max);
     }
-    if (value < -16384) {
-        return -16384;
+    if (value < min) {
+        return static_cast<int16_t>(min);
     }
     return static_cast<int16_t>(value);
 }
@@ -136,16 +150,28 @@ void DmDeviceWrapper::sendGroup(int groupIndex, const QVector<int16_t>& values)
         return;
     }
 
-    uint32_t can_id = (groupIndex == 0) ? 0x3FE : 0x4FE;
+    // Get command group from profile
+    if (groupIndex < 0 || groupIndex >= m_activeProfile.commandGroups.size()) {
+        return;
+    }
+    const MotorCommandGroup& group = m_activeProfile.commandGroups[groupIndex];
+
     uint8_t payload[8];
 
     for (int i = 0; i < 4; ++i) {
         int16_t v = clampValue(values[i]);
-        payload[i * 2] = static_cast<uint8_t>((v >> 8) & 0xFF);
-        payload[i * 2 + 1] = static_cast<uint8_t>(v & 0xFF);
+        if (group.littleEndian) {
+            // Little endian: LSB first
+            payload[i * 2] = static_cast<uint8_t>(v & 0xFF);
+            payload[i * 2 + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        } else {
+            // Big endian: MSB first
+            payload[i * 2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+            payload[i * 2 + 1] = static_cast<uint8_t>(v & 0xFF);
+        }
     }
 
-    device_channel_send_fast(m_device, m_channel, can_id, 1, false, false, false, 8, payload);
+    device_channel_send_fast(m_device, m_channel, group.canId, 1, false, false, false, 8, payload);
 }
 
 void DmDeviceWrapper::recCallbackThunk(usb_rx_frame_t* frame)
@@ -156,30 +182,67 @@ void DmDeviceWrapper::recCallbackThunk(usb_rx_frame_t* frame)
     s_instance->handleRecFrame(frame);
 }
 
-int DmDeviceWrapper::toMotorId(uint32_t canId) const
+int DmDeviceWrapper::matchMotor(uint32_t canId) const
 {
-    if (canId >= 0x301 && canId <= 0x308) {
-        return static_cast<int>(canId - 0x300);
+    for (int i = 0; i < m_activeProfile.motors.size(); ++i) {
+        if (m_activeProfile.motors[i].canIdMatcher.matches(canId)) {
+            return i;
+        }
     }
     return -1;
 }
 
+MotorMeasure DmDeviceWrapper::parseFrame(int motorIndex, const uint8_t* payload) const
+{
+    MotorMeasure measure;
+
+    if (motorIndex < 0 || motorIndex >= m_activeProfile.motors.size()) {
+        return measure;
+    }
+
+    const MotorDescriptor& motor = m_activeProfile.motors[motorIndex];
+
+    // Parse each field using bit extractor
+    for (const FieldDefinition& field : motor.fields) {
+        int32_t rawValue = BitExtractor::extract(
+            payload,
+            field.byteOffset,
+            field.bits.start,
+            field.bits.length,
+            field.littleEndian,
+            field.signedValue
+        );
+
+        double scaledValue = static_cast<double>(rawValue) * field.scale;
+        measure.fields.insert(field.id, scaledValue);
+
+        // Also populate legacy fields for backward compatibility
+        if (field.id == QStringLiteral("ecd")) {
+            measure.ecd = static_cast<uint16_t>(rawValue);
+        } else if (field.id == QStringLiteral("speed")) {
+            measure.speed_rpm = static_cast<int16_t>(rawValue);
+        } else if (field.id == QStringLiteral("current")) {
+            measure.current = static_cast<int16_t>(rawValue);
+        } else if (field.id == QStringLiteral("rotor_temp")) {
+            measure.rotor_temperature = static_cast<uint8_t>(rawValue);
+        } else if (field.id == QStringLiteral("pcb_temp")) {
+            measure.pcb_temperature = static_cast<uint8_t>(rawValue);
+        }
+    }
+
+    return measure;
+}
+
 void DmDeviceWrapper::handleRecFrame(usb_rx_frame_t* frame)
 {
-    int motorId = toMotorId(frame->head.can_id);
-    if (motorId < 0) {
+    int motorIndex = matchMotor(frame->head.can_id);
+    if (motorIndex < 0) {
         return;
     }
 
-    MotorMeasure measure;
-    const uint8_t* data = frame->payload;
-    measure.ecd = static_cast<uint16_t>(data[0] << 8 | data[1]);
-    measure.speed_rpm = static_cast<int16_t>(data[2] << 8 | data[3]);
-    measure.current = static_cast<int16_t>(data[4] << 8 | data[5]);
-    measure.rotor_temperature = data[6];
-    measure.pcb_temperature = data[7];
+    MotorMeasure measure = parseFrame(motorIndex, frame->payload);
 
-    QMetaObject::invokeMethod(this, [this, motorId, measure]() {
-        emit motorUpdated(motorId, measure);
+    QMetaObject::invokeMethod(this, [this, motorIndex, measure]() {
+        emit motorUpdated(motorIndex, measure);
     }, Qt::QueuedConnection);
 }

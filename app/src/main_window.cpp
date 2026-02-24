@@ -1,4 +1,7 @@
 #include "main_window.h"
+#include "motor_profile_loader.h"
+#include "telemetry_data_store.h"
+#include "telemetry_dashboard.h"
 
 #include <QApplication>
 #include <QGridLayout>
@@ -9,8 +12,6 @@
 #include <QVBoxLayout>
 
 namespace {
-constexpr int kValueMin = -16384;
-constexpr int kValueMax = 16384;
 constexpr int kGroupCount = 2;
 constexpr int kMotorsPerGroup = 4;
 constexpr int kMotorCount = 8;
@@ -19,19 +20,77 @@ constexpr int kMotorCount = 8;
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , m_device(new DmDeviceWrapper(this))
+    , m_dataStore(new TelemetryDataStore(this))
 {
     setWindowTitle(QStringLiteral("DM CAN Control"));
+
+    // Load profiles
+    loadProfiles();
+
     QWidget* root = new QWidget(this);
     QVBoxLayout* layout = new QVBoxLayout(root);
 
     layout->addWidget(buildConnectionBar());
-    layout->addWidget(buildControls());
-    layout->addWidget(buildReceiveTable());
+
+    // Create tab widget
+    m_tabWidget = new QTabWidget(this);
+    m_tabWidget->addTab(buildControlsTab(), QStringLiteral("Controls"));
+
+    // Create and add telemetry dashboard
+    m_dashboard = new TelemetryDashboard(this);
+    m_dashboard->setDataStore(m_dataStore);
+    m_dashboard->setActiveProfile(m_activeProfile);
+    m_tabWidget->addTab(m_dashboard, QStringLiteral("Telemetry Dashboard"));
+
+    layout->addWidget(m_tabWidget, 1);
 
     setCentralWidget(root);
 
     connect(m_device, &DmDeviceWrapper::deviceStatusChanged, this, &MainWindow::updateStatus);
     connect(m_device, &DmDeviceWrapper::motorUpdated, this, &MainWindow::updateMotorRow);
+    connect(m_device, &DmDeviceWrapper::motorUpdated, m_dataStore, &TelemetryDataStore::onMotorUpdated);
+}
+
+void MainWindow::loadProfiles()
+{
+    m_profiles = MotorProfileLoader::loadAllProfiles();
+    if (!m_profiles.isEmpty()) {
+        m_activeProfile = m_profiles.first();
+        m_device->setActiveProfile(m_activeProfile);
+    }
+}
+
+void MainWindow::onProfileChanged(int index)
+{
+    if (index < 0 || index >= m_profiles.size()) {
+        return;
+    }
+    applyProfile(m_profiles[index]);
+}
+
+void MainWindow::applyProfile(const MotorProfile& profile)
+{
+    m_activeProfile = profile;
+    m_device->setActiveProfile(profile);
+
+    // Update control limits
+    int min = profile.controlLimits.min;
+    int max = profile.controlLimits.max;
+    for (int g = 0; g < kGroupCount; ++g) {
+        for (int i = 0; i < kMotorsPerGroup; ++i) {
+            if (i < m_groups[g].sliders.size()) {
+                m_groups[g].sliders[i]->setRange(min, max);
+            }
+            if (i < m_groups[g].spins.size()) {
+                m_groups[g].spins[i]->setRange(min, max);
+            }
+        }
+    }
+
+    // Update dashboard
+    if (m_dashboard) {
+        m_dashboard->setActiveProfile(profile);
+    }
 }
 
 QWidget* MainWindow::buildConnectionBar()
@@ -39,6 +98,14 @@ QWidget* MainWindow::buildConnectionBar()
     QWidget* bar = new QWidget(this);
     QHBoxLayout* layout = new QHBoxLayout(bar);
     layout->setContentsMargins(0, 0, 0, 0);
+
+    // Profile selector
+    m_profileCombo = new QComboBox(bar);
+    for (const MotorProfile& profile : m_profiles) {
+        m_profileCombo->addItem(profile.name);
+    }
+    connect(m_profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onProfileChanged);
 
     m_deviceType = new QComboBox(bar);
     m_deviceType->addItem(QStringLiteral("USB2CANFD"), DEV_USB2CANFD);
@@ -61,6 +128,8 @@ QWidget* MainWindow::buildConnectionBar()
     m_closeButton = new QPushButton(QStringLiteral("Close"), bar);
     m_statusLabel = new QLabel(QStringLiteral("Disconnected"), bar);
 
+    layout->addWidget(new QLabel(QStringLiteral("Profile"), bar));
+    layout->addWidget(m_profileCombo);
     layout->addWidget(new QLabel(QStringLiteral("Device"), bar));
     layout->addWidget(m_deviceType);
     layout->addWidget(new QLabel(QStringLiteral("Channel"), bar));
@@ -88,25 +157,54 @@ QWidget* MainWindow::buildConnectionBar()
     return bar;
 }
 
+QWidget* MainWindow::buildControlsTab()
+{
+    QWidget* container = new QWidget(this);
+    QVBoxLayout* layout = new QVBoxLayout(container);
+
+    layout->addWidget(buildControls());
+    layout->addWidget(buildReceiveTable());
+
+    return container;
+}
+
 QWidget* MainWindow::buildControls()
 {
     QWidget* container = new QWidget(this);
     QHBoxLayout* layout = new QHBoxLayout(container);
 
+    int valueMin = m_activeProfile.controlLimits.min;
+    int valueMax = m_activeProfile.controlLimits.max;
+
     for (int g = 0; g < kGroupCount; ++g) {
-        QGroupBox* box = new QGroupBox(g == 0 ? QStringLiteral("Group 1-4 (0x3FE)")
-                                             : QStringLiteral("Group 5-8 (0x4FE)"), container);
+        QString groupLabel;
+        if (g < m_activeProfile.commandGroups.size()) {
+            groupLabel = m_activeProfile.commandGroups[g].label;
+        } else {
+            groupLabel = g == 0 ? QStringLiteral("Group 1-4 (0x3FE)")
+                                : QStringLiteral("Group 5-8 (0x4FE)");
+        }
+
+        QGroupBox* box = new QGroupBox(groupLabel, container);
         QVBoxLayout* boxLayout = new QVBoxLayout(box);
 
         QGridLayout* grid = new QGridLayout();
         for (int i = 0; i < kMotorsPerGroup; ++i) {
-            QLabel* label = new QLabel(QStringLiteral("Motor %1").arg(g * 4 + i + 1), box);
+            QString motorLabel;
+            int motorIdx = g * kMotorsPerGroup + i;
+            if (motorIdx < m_activeProfile.motors.size()) {
+                motorLabel = m_activeProfile.motors[motorIdx].label;
+            } else {
+                motorLabel = QStringLiteral("Motor %1").arg(motorIdx + 1);
+            }
+
+            QLabel* label = new QLabel(motorLabel, box);
             QSlider* slider = new QSlider(Qt::Horizontal, box);
-            slider->setRange(kValueMin, kValueMax);
+            slider->setRange(valueMin, valueMax);
             slider->setValue(0);
 
             QSpinBox* spin = new QSpinBox(box);
-            spin->setRange(kValueMin, kValueMax);
+            spin->setRange(valueMin, valueMax);
             spin->setValue(0);
 
             grid->addWidget(label, i, 0);
@@ -180,7 +278,13 @@ QWidget* MainWindow::buildReceiveTable()
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
 
     for (int i = 0; i < kMotorCount; ++i) {
-        m_table->setItem(i, 0, new QTableWidgetItem(QString::number(i + 1)));
+        QString motorLabel;
+        if (i < m_activeProfile.motors.size()) {
+            motorLabel = m_activeProfile.motors[i].label;
+        } else {
+            motorLabel = QString::number(i + 1);
+        }
+        m_table->setItem(i, 0, new QTableWidgetItem(motorLabel));
         for (int c = 1; c < 6; ++c) {
             m_table->setItem(i, c, new QTableWidgetItem(QStringLiteral("-")));
         }
@@ -226,18 +330,18 @@ void MainWindow::updateStatus(bool ok, const QString& message)
     }
 }
 
-void MainWindow::updateMotorRow(int motorId, const MotorMeasure& measure)
+void MainWindow::updateMotorRow(int motorIndex, const MotorMeasure& measure)
 {
     if (!m_table) {
         return;
     }
-    int row = motorId - 1;
-    if (row < 0 || row >= kMotorCount) {
+    // motorIndex is now 0-based
+    if (motorIndex < 0 || motorIndex >= kMotorCount) {
         return;
     }
-    m_table->item(row, 1)->setText(QString::number(measure.ecd));
-    m_table->item(row, 2)->setText(QString::number(measure.speed_rpm));
-    m_table->item(row, 3)->setText(QString::number(measure.current));
-    m_table->item(row, 4)->setText(QString::number(measure.rotor_temperature));
-    m_table->item(row, 5)->setText(QString::number(measure.pcb_temperature));
+    m_table->item(motorIndex, 1)->setText(QString::number(measure.ecd));
+    m_table->item(motorIndex, 2)->setText(QString::number(measure.speed_rpm));
+    m_table->item(motorIndex, 3)->setText(QString::number(measure.current));
+    m_table->item(motorIndex, 4)->setText(QString::number(measure.rotor_temperature));
+    m_table->item(motorIndex, 5)->setText(QString::number(measure.pcb_temperature));
 }
