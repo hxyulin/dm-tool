@@ -43,12 +43,15 @@ if(WIN32)
         )
     endif()
 elseif(UNIX)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         set(DM_SDK_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib/linux/aarch64)
     else()
         set(DM_SDK_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib/linux/x86_64)
     endif()
-    target_link_libraries(dm_gui PRIVATE ${DM_SDK_LIB_DIR}/libdm_device.so)
+    target_include_directories(dm_gui PRIVATE ${LIBUSB_INCLUDE_DIRS})
+    target_link_libraries(dm_gui PRIVATE ${DM_SDK_LIB_DIR}/libdm_device.so ${LIBUSB_LIBRARIES})
     add_custom_command(TARGET dm_gui POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${DM_SDK_LIB_DIR}/libdm_device.so
